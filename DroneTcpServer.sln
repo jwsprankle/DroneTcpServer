@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36414.22 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{803FD0C6-D64E-4E16-9DC3-1DAEC859A3D2}") = "DroneTcpServer", "DroneTcpServer.vgdbproj", "{A54508B4-62C3-42D7-999B-15ADC2801F35}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|VisualGDB = Debug|VisualGDB
+		Release|VisualGDB = Release|VisualGDB
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A54508B4-62C3-42D7-999B-15ADC2801F35}.Debug|VisualGDB.ActiveCfg = Debug|VisualGDB
+		{A54508B4-62C3-42D7-999B-15ADC2801F35}.Debug|VisualGDB.Build.0 = Debug|VisualGDB
+		{A54508B4-62C3-42D7-999B-15ADC2801F35}.Release|VisualGDB.ActiveCfg = Release|VisualGDB
+		{A54508B4-62C3-42D7-999B-15ADC2801F35}.Release|VisualGDB.Build.0 = Release|VisualGDB
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {31A5B8A2-37A3-4241-939F-356605AA3A48}
+	EndGlobalSection
+EndGlobal

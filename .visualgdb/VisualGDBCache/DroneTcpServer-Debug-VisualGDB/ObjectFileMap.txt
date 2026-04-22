@@ -1,0 +1,1 @@
+C:\Users\jwspr\source\repos\DroneTcpServer\main\tcp_server.c|esp-idf/main/CMakeFiles/__idf_main.dir/tcp_server.c.obj
