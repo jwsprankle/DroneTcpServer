@@ -11,6 +11,7 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -22,6 +23,8 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
+
+#include "uart.h"
 
 #define PORT CONFIG_EXAMPLE_PORT
 #define KEEPALIVE_IDLE CONFIG_EXAMPLE_KEEPALIVE_IDLE
@@ -37,6 +40,11 @@
 
 #define WIFI_CONNECTED_BIT BIT0
 
+#define UART_PORT UART_NUM_1
+#define UART_TX_PIN 4
+#define UART_RX_PIN 5
+#define BUF_SIZE 1024
+
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
 
@@ -47,43 +55,99 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static const char *TAG = "wifi station";
 
+//static void do_retransmit(const int sock)
+//{
+//    int len;
+//    char rx_buffer[128];
+//
+//    do
+//    {
+//        len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+//        if (len < 0)
+//        {
+//            ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+//        }
+//        else if (len == 0)
+//        {
+//            ESP_LOGW(TAG, "Connection closed");
+//        }
+//        else
+//        {
+//            rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
+//            ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+//
+//            // send() can return less bytes than supplied length.
+//            // Walk-around for robust implementation.
+//            int to_write = len;
+//            while (to_write > 0)
+//            {
+//                int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+//                if (written < 0)
+//                {
+//                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+//                    // Failed to retransmit, giving up
+//                    return;
+//                }
+//                to_write -= written;
+//            }
+//        }
+//    } while (len > 0);
+//}
+
 static void do_retransmit(const int sock)
 {
     int len;
-    char rx_buffer[128];
+    uint8_t tcp_buffer[128];
+    uint8_t uart_buffer[128];
 
-    do
+    while (1)
     {
-        len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        // --- TCP ? UART ---
+        len = recv(sock, tcp_buffer, sizeof(tcp_buffer), MSG_DONTWAIT);
         if (len < 0)
         {
-            ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+            if (errno != EWOULDBLOCK && errno != EAGAIN)
+            {
+                ESP_LOGE(TAG, "recv failed: errno %d", errno);
+                return;
+            }
         }
         else if (len == 0)
         {
             ESP_LOGW(TAG, "Connection closed");
+            return;
         }
         else
         {
-            rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
-            ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+            ESP_LOGI(TAG, "TCP->UART %d bytes", len);
+            uart_write_bytes(UART_PORT, (const char *)tcp_buffer, len);
+        }
 
-            // send() can return less bytes than supplied length.
-            // Walk-around for robust implementation.
-            int to_write = len;
+        // --- UART ? TCP ---
+        int uart_len = uart_read_bytes(UART_PORT, uart_buffer, sizeof(uart_buffer), 0);
+        if (uart_len > 0)
+        {
+            ESP_LOGI(TAG, "UART->TCP %d bytes", uart_len);
+
+            int to_write = uart_len;
             while (to_write > 0)
             {
-                int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+                int written = send(sock,
+                                   uart_buffer + (uart_len - to_write),
+                                   to_write,
+                                   0);
                 if (written < 0)
                 {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                    // Failed to retransmit, giving up
+                    ESP_LOGE(TAG, "send failed: errno %d", errno);
                     return;
                 }
                 to_write -= written;
             }
         }
-    } while (len > 0);
+
+        // prevent CPU spin
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 static void tcp_server_task(void *pvParameters)
@@ -105,16 +169,6 @@ static void tcp_server_task(void *pvParameters)
         dest_addr_ip4->sin_family = AF_INET;
         dest_addr_ip4->sin_port = htons(PORT);
         ip_protocol = IPPROTO_IP;
-    }
-#endif
-#ifdef CONFIG_EXAMPLE_IPV6
-    if (addr_family == AF_INET6)
-    {
-        struct sockaddr_in6 *dest_addr_ip6 = (struct sockaddr_in6 *)&dest_addr;
-        bzero(&dest_addr_ip6->sin6_addr.un, sizeof(dest_addr_ip6->sin6_addr.un));
-        dest_addr_ip6->sin6_family = AF_INET6;
-        dest_addr_ip6->sin6_port = htons(PORT);
-        ip_protocol = IPPROTO_IPV6;
     }
 #endif
 
@@ -171,18 +225,12 @@ static void tcp_server_task(void *pvParameters)
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
         // Convert ip address to string
-#ifdef CONFIG_EXAMPLE_IPV4
+
         if (source_addr.ss_family == PF_INET)
         {
             inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
         }
-#endif
-#ifdef CONFIG_EXAMPLE_IPV6
-        if (source_addr.ss_family == PF_INET6)
-        {
-            inet6_ntoa_r(((struct sockaddr_in6 *)&source_addr)->sin6_addr, addr_str, sizeof(addr_str) - 1);
-        }
-#endif
+
         ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
 
         do_retransmit(sock);
@@ -292,6 +340,23 @@ void wifi_init_sta(void)
     }
 }
 
+void uart_init(void)
+{
+    const uart_config_t uart_config = {
+        .baud_rate = 57600, // match your device
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT};
+
+    uart_driver_install(UART_PORT, BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_PORT, &uart_config);
+    uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+
+    ESP_LOGI(TAG, "UART init done (57600 8N1)");
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -300,7 +365,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     
+    uart_init();
     wifi_init_sta();
+
     
+    //xTaskCreate(uart_echo_task, "uart_echo", 4096, NULL, 5, NULL);
     xTaskCreate(tcp_server_task, "tcp_server", 4096, (void *)AF_INET, 5, NULL);
 }
