@@ -8,7 +8,7 @@
     </MemoryUtilization>
     <MemoryUtilization>
       <MemoryName>INSTR_FLASH</MemoryName>
-      <Used>84480</Used>
+      <Used>47104</Used>
       <Total>3342336</Total>
     </MemoryUtilization>
     <MemoryUtilization>
@@ -43,7 +43,7 @@
     </MemoryUtilization>
     <MemoryUtilization>
       <MemoryName>Unknown</MemoryName>
-      <Used>1506094</Used>
+      <Used>317750</Used>
       <Total>0</Total>
     </MemoryUtilization>
   </Memories>
