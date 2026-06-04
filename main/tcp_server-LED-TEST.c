@@ -1,188 +1,55 @@
-#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
+#include <stdint.h>
 
-#define BATTERY_ADC_CHANNEL ADC_CHANNEL_1 // GPIO1 on ESP32-C3
-#define BATTERY_ADC_UNIT ADC_UNIT_1
-
-#define R_TOP_OHMS 100000.0f
-#define R_BOTTOM_OHMS 47000.0f
-#define DIVIDER_RATIO ((R_TOP_OHMS + R_BOTTOM_OHMS) / R_BOTTOM_OHMS)
-#define BATTERY_CAL_FACTOR 0.9852f
-
-#define LED1_GPIO GPIO_NUM_6 // leftmost
+#define LED1_GPIO GPIO_NUM_6 // leftmost / MSB
 #define LED2_GPIO GPIO_NUM_7
-#define LED3_GPIO GPIO_NUM_8                                            
+#define LED3_GPIO GPIO_NUM_8
 #define LED4_GPIO GPIO_NUM_9
-#define LED5_GPIO GPIO_NUM_10 // rightmost
+#define LED5_GPIO GPIO_NUM_10 // rightmost / LSB
 
-static const gpio_num_t battery_leds[5] = {
+static const gpio_num_t led_pins[5] = {
     LED1_GPIO,
     LED2_GPIO,
     LED3_GPIO,
     LED4_GPIO,
     LED5_GPIO};
 
-#define ADC_SAMPLES 32
-
-static const char *TAG = "battery_test";
-
-static adc_oneshot_unit_handle_t adc_handle;
-static adc_cali_handle_t adc_cali_handle;
-static bool adc_calibrated = false;
-
-static bool adc_calibration_init(void)
+static void set_led_binary(uint8_t value)
 {
-    adc_cali_curve_fitting_config_t cali_config = {
-        .unit_id = BATTERY_ADC_UNIT,
-        .chan = BATTERY_ADC_CHANNEL,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-
-    esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle);
-
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "ADC calibration enabled");
-        return true;
-    }
-
-    ESP_LOGW(TAG, "ADC calibration not available");
-    return false;
+    // Display as normal binary: MSB on left, LSB on right
+    gpio_set_level(LED1_GPIO, (value >> 4) & 0x01);
+    gpio_set_level(LED2_GPIO, (value >> 3) & 0x01);
+    gpio_set_level(LED3_GPIO, (value >> 2) & 0x01);
+    gpio_set_level(LED4_GPIO, (value >> 1) & 0x01);
+    gpio_set_level(LED5_GPIO, (value >> 0) & 0x01);
 }
 
-static void battery_adc_init(void)
+static void led_test_task(void *arg)
 {
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = BATTERY_ADC_UNIT,
-    };
+    uint8_t count = 0;
 
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
-
-    adc_oneshot_chan_cfg_t chan_config = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_12,
-    };
-
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(
-        adc_handle,
-        BATTERY_ADC_CHANNEL,
-        &chan_config));
-
-    adc_calibrated = adc_calibration_init();
-}
-
-static float battery_read_voltage(void)
-{
-    int raw_sum = 0;
-    int mv_sum = 0;
-
-    for (int i = 0; i < ADC_SAMPLES; i++)
+    while (1)
     {
-        int raw = 0;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, BATTERY_ADC_CHANNEL, &raw));
-        raw_sum += raw;
+        set_led_binary(count);
 
-        if (adc_calibrated)
-        {
-            int mv = 0;
-            ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc_cali_handle, raw, &mv));
-            mv_sum += mv;
-        }
+        count = (count + 1) & 0x1F; // 0..31
 
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
-
-    float raw_avg = (float)raw_sum / ADC_SAMPLES;
-
-    float adc_voltage = 0.0f;
-
-    if (adc_calibrated)
-    {
-        float mv_avg = (float)mv_sum / ADC_SAMPLES;
-        adc_voltage = mv_avg / 1000.0f;
-    }
-    else
-    {
-        // fallback estimate, less accurate
-        adc_voltage = (raw_avg / 4095.0f) * 3.3f;
-    }
-
-    float battery_voltage = adc_voltage * DIVIDER_RATIO;
-
-    ESP_LOGI(TAG,
-             "raw=%.1f adc=%.3fV battery=%.3fV",
-             raw_avg,
-             adc_voltage,
-             battery_voltage);      
-    
-    battery_voltage *= BATTERY_CAL_FACTOR;
-    
-    return battery_voltage;
-}
-
-static void battery_leds_init(void)
-{
-    for (int i = 0; i < 5; i++)
-    {
-        gpio_reset_pin(battery_leds[i]);
-        gpio_set_direction(battery_leds[i], GPIO_MODE_OUTPUT);
-        gpio_set_level(battery_leds[i], 0);
-    }
-}
-
-static void battery_led_set_level(uint8_t level)
-{
-    if (level > 5)
-    {
-        level = 5;
-    }
-
-    for (int i = 0; i < 5; i++)
-    {
-        gpio_set_level(battery_leds[i], i < level ? 1 : 0);
-    }
-}
-
-static uint8_t battery_voltage_to_level(float v)
-{
-    if (v >= 8.20f)
-        return 5;
-    if (v >= 7.90f)
-        return 4;
-    if (v >= 7.65f)
-        return 3;
-    if (v >= 7.40f)
-        return 2;
-    if (v >= 6.80f)
-        return 1;
-
-    return 0; // Future: flashing low-battery warning
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Battery ADC test starting");
-
-    battery_adc_init();
-    battery_leds_init();
-    battery_led_set_level(0);
-    while (1)
+    for (int i = 0; i < 5; i++)
     {
-        float v = battery_read_voltage();
-
-        uint8_t level = battery_voltage_to_level(v);
-
-        battery_led_set_level(level);
-
-        ESP_LOGI(TAG, "battery=%.3fV level=%u", v, level);
+        gpio_reset_pin(led_pins[i]);
+        gpio_set_direction(led_pins[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(led_pins[i], 0);
     }
+
+    xTaskCreate(led_test_task, "led_test", 2048, NULL, 5, NULL);
 }
 ///* BSD Socket API Example
 //
