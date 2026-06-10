@@ -108,17 +108,19 @@ static void battery_led_set_level(uint8_t level)
 static void battery_led_startup_test(void)
 {
     const uint8_t pattern[] = {
-        0x01, // 00001
-        0x03, // 00011
-        0x07, // 00111
-        0x0F, // 01111
-        0x1F  // 11111
+
+        0b10000,  // Low level
+        0b11000,
+        0b11100,
+        0b11110,
+        0b11111, // High level
+        0b10001  // Done with startup
     };
 
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < sizeof(pattern); i++)
     {
         battery_led_set_binary(pattern[i]);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
