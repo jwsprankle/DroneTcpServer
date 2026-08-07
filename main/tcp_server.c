@@ -41,7 +41,8 @@
 #define UART_PORT UART_NUM_1
 #define UART_TX_PIN GPIO_NUM_4
 #define UART_RX_PIN GPIO_NUM_5
-#define UART_BAUD_RATE 57600
+#define UART_BAUD_RATE 115200   // Telemetry radio module
+//#define UART_BAUD_RATE 115200  // GPS module
 #define UART_BUF_SIZE 1024
 
 #define BATTERY_ADC_UNIT ADC_UNIT_1
@@ -57,6 +58,9 @@
 #define LED3_GPIO GPIO_NUM_8
 #define LED4_GPIO GPIO_NUM_2  // moved away from GPIO9
 #define LED5_GPIO GPIO_NUM_10 // rightmost
+
+// How to test TCP server with putty:
+// putty.exe -raw 10.0.0.3 -P 3333
 
 static const char *TAG = "wifi station";
 
@@ -274,7 +278,8 @@ static void do_retransmit(const int sock)
     while (1)
     {
         len = recv(sock, tcp_buffer, sizeof(tcp_buffer), MSG_DONTWAIT);
-
+        ESP_LOGI(TAG, "TCP->UART recv=%d errno=%d", len, errno);
+        
         if (len < 0)
         {
             if (errno != EWOULDBLOCK && errno != EAGAIN)
@@ -307,6 +312,9 @@ static void do_retransmit(const int sock)
                                    uart_buffer + (uart_len - to_write),
                                    to_write,
                                    0);
+                ESP_LOGI(TAG, "TCP sent=%d errno=%d", written, errno);
+                ESP_LOGI(TAG, "UART wrote=%d", written);
+                
                 if (written < 0)
                 {
                     ESP_LOGE(TAG, "send failed: errno %d", errno);
@@ -323,94 +331,254 @@ static void do_retransmit(const int sock)
 
 static void tcp_server_task(void *pvParameters)
 {
-    char addr_str[128];
-    int addr_family = (int)pvParameters;
-    int ip_protocol = 0;
-    int keepAlive = 1;
-    int keepIdle = KEEPALIVE_IDLE;
-    int keepInterval = KEEPALIVE_INTERVAL;
-    int keepCount = KEEPALIVE_COUNT;
-    struct sockaddr_storage dest_addr;
+    const int addr_family = (int)pvParameters;
 
-    if (addr_family == AF_INET)
-    {
-        struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-        dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-        dest_addr_ip4->sin_family = AF_INET;
-        dest_addr_ip4->sin_port = htons(PORT);
-        ip_protocol = IPPROTO_IP;
-    }
+    const int keep_alive = 1;
+    const int keep_idle = KEEPALIVE_IDLE;
+    const int keep_interval = KEEPALIVE_INTERVAL;
+    const int keep_count = KEEPALIVE_COUNT;
 
-    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-
-    if (listen_sock < 0)
-    {
-        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    ESP_LOGI(TAG, "Socket created");
-
-    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-
-    if (err != 0)
-    {
-        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        goto CLEAN_UP;
-    }
-
-    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-
-    err = listen(listen_sock, 1);
-
-    if (err != 0)
-    {
-        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        goto CLEAN_UP;
-    }
-
+    /*
+     * Outer loop:
+     * Recreates the listening socket after a serious socket,
+     * bind, listen, or accept failure.
+     */
     while (1)
     {
-        ESP_LOGI(TAG, "Socket listening");
+        int listen_sock = -1;
+        int ip_protocol = 0;
 
-        struct sockaddr_storage source_addr;
-        socklen_t addr_len = sizeof(source_addr);
+        struct sockaddr_storage dest_addr = {0};
+        socklen_t dest_addr_len = 0;
 
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-
-        if (sock < 0)
+        if (addr_family == AF_INET)
         {
-            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
+            struct sockaddr_in *dest_addr_ip4 =
+                (struct sockaddr_in *)&dest_addr;
+
+            dest_addr_ip4->sin_family = AF_INET;
+            dest_addr_ip4->sin_port = htons(PORT);
+            dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+
+            ip_protocol = IPPROTO_IP;
+            dest_addr_len = sizeof(struct sockaddr_in);
+        }
+        else
+        {
+            ESP_LOGE(TAG,
+                     "Unsupported address family: %d",
+                     addr_family);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
-        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
-        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+        ESP_LOGI(TAG, "Creating TCP listening socket");
 
-        if (source_addr.ss_family == PF_INET)
+        listen_sock = socket(addr_family,
+                             SOCK_STREAM,
+                             ip_protocol);
+
+        if (listen_sock < 0)
         {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr,
-                        addr_str,
-                        sizeof(addr_str) - 1);
+            const int socket_errno = errno;
+
+            ESP_LOGE(TAG,
+                     "socket() failed: errno=%d",
+                     socket_errno);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
-        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+        int reuse_addr = 1;
 
-        do_retransmit(sock);
+        if (setsockopt(listen_sock,
+                       SOL_SOCKET,
+                       SO_REUSEADDR,
+                       &reuse_addr,
+                       sizeof(reuse_addr)) < 0)
+        {
+            ESP_LOGW(TAG,
+                     "SO_REUSEADDR failed: errno=%d",
+                     errno);
+        }
 
-        shutdown(sock, 0);
-        close(sock);
+        if (bind(listen_sock,
+                 (struct sockaddr *)&dest_addr,
+                 dest_addr_len) < 0)
+        {
+            const int bind_errno = errno;
+
+            ESP_LOGE(TAG,
+                     "bind() failed on port %d: errno=%d",
+                     PORT,
+                     bind_errno);
+
+            close(listen_sock);
+            listen_sock = -1;
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        if (listen(listen_sock, 1) < 0)
+        {
+            const int listen_errno = errno;
+
+            ESP_LOGE(TAG,
+                     "listen() failed: errno=%d",
+                     listen_errno);
+
+            close(listen_sock);
+            listen_sock = -1;
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        ESP_LOGI(TAG,
+                 "TCP server listening on port %d",
+                 PORT);
+
+        /*
+         * Inner loop:
+         * Accept and service one client at a time.
+         */
+        while (1)
+        {
+            struct sockaddr_storage source_addr = {0};
+            socklen_t source_addr_len = sizeof(source_addr);
+
+            ESP_LOGI(TAG, "Waiting for TCP client");
+
+            int sock = accept(
+                listen_sock,
+                (struct sockaddr *)&source_addr,
+                &source_addr_len);
+
+            if (sock < 0)
+            {
+                const int accept_errno = errno;
+
+                /*
+                 * These errors can be temporary. Wait briefly and
+                 * try accept() again without destroying the listener.
+                 */
+                if (accept_errno == EINTR ||
+                    accept_errno == EAGAIN ||
+                    accept_errno == EWOULDBLOCK)
+                {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    continue;
+                }
+
+                /*
+                 * For any other accept error, recreate the entire
+                 * listening socket using the outer loop.
+                 */
+                ESP_LOGE(TAG,
+                         "accept() failed: errno=%d; "
+                         "restarting TCP server",
+                         accept_errno);
+
+                break;
+            }
+
+            char addr_str[128] = {0};
+
+            if (source_addr.ss_family == AF_INET)
+            {
+                inet_ntoa_r(
+                    ((struct sockaddr_in *)&source_addr)->sin_addr,
+                    addr_str,
+                    sizeof(addr_str));
+            }
+            else
+            {
+                snprintf(addr_str,
+                         sizeof(addr_str),
+                         "unknown");
+            }
+
+            ESP_LOGI(TAG,
+                     "TCP client connected from %s",
+                     addr_str);
+
+            if (setsockopt(sock,
+                           SOL_SOCKET,
+                           SO_KEEPALIVE,
+                           &keep_alive,
+                           sizeof(keep_alive)) < 0)
+            {
+                ESP_LOGW(TAG,
+                         "SO_KEEPALIVE failed: errno=%d",
+                         errno);
+            }
+
+            if (setsockopt(sock,
+                           IPPROTO_TCP,
+                           TCP_KEEPIDLE,
+                           &keep_idle,
+                           sizeof(keep_idle)) < 0)
+            {
+                ESP_LOGW(TAG,
+                         "TCP_KEEPIDLE failed: errno=%d",
+                         errno);
+            }
+
+            if (setsockopt(sock,
+                           IPPROTO_TCP,
+                           TCP_KEEPINTVL,
+                           &keep_interval,
+                           sizeof(keep_interval)) < 0)
+            {
+                ESP_LOGW(TAG,
+                         "TCP_KEEPINTVL failed: errno=%d",
+                         errno);
+            }
+
+            if (setsockopt(sock,
+                           IPPROTO_TCP,
+                           TCP_KEEPCNT,
+                           &keep_count,
+                           sizeof(keep_count)) < 0)
+            {
+                ESP_LOGW(TAG,
+                         "TCP_KEEPCNT failed: errno=%d",
+                         errno);
+            }
+
+            /*
+             * This function must return when:
+             *
+             *   recv() returns 0, meaning the client disconnected;
+             *   recv() reports a real socket error;
+             *   send() reports a real socket error.
+             *
+             * EAGAIN/EWOULDBLOCK alone must not be treated as fatal.
+             */
+            do_retransmit(sock);
+
+            ESP_LOGI(TAG,
+                     "Closing TCP client connection");
+
+            shutdown(sock, SHUT_RDWR);
+            close(sock);
+
+            ESP_LOGI(TAG,
+                     "TCP client disconnected; "
+                     "returning to accept()");
+        }
+
+        ESP_LOGW(TAG,
+                 "Closing and recreating listening socket");
+
+        shutdown(listen_sock, SHUT_RDWR);
+        close(listen_sock);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
-
-CLEAN_UP:
-    close(listen_sock);
-    vTaskDelete(NULL);
 }
 
 static void event_handler(void *arg,
